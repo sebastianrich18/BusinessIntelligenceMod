@@ -13,13 +13,14 @@ using ScheduleOne.Quests;
 using ScheduleOne.ItemFramework;
 using ScheduleOne.Product;
 using ScheduleOne.UI.Handover;
+using Harmony;
 
 namespace BusinessIntelligenceMod
 {
     public class BusinessIntelligenceMod : MelonMod
     {
         public static readonly string ModDataPath = Path.Combine(Application.persistentDataPath, "BusinessIntelligence");
-        public static BusinessIntelligenceMod Instance;
+        public static BusinessIntelligenceMod Instance { get; private set; }
 
         // Single tracking list for simplicity in the starter version
         private List<string> salesLog = new List<string>();
@@ -33,8 +34,8 @@ namespace BusinessIntelligenceMod
                 // Create data directory
                 Directory.CreateDirectory(ModDataPath);
 
-                // Apply Harmony patches - fixed: use HarmonyLib.Harmony instead of just Harmony
-                HarmonyLib.Harmony harmony = new HarmonyLib.Harmony("com.sibby.businessintelligence");
+                // Apply Harmony patches
+                HarmonyLib.Harmony harmony = new HarmonyLib.Harmony("com.yourusername.businessintelligence");
 
                 // Log all customer methods to help with debugging
                 LogCustomerMethods();
@@ -115,7 +116,6 @@ namespace BusinessIntelligenceMod
         }
 
         // Single harmony patch for initial testing
-        // Fixed: removed the __instance != null check
         public static void ProcessHandoverServerSide_Postfix(Customer __instance, object outcome,
                                                             List<ItemInstance> items, bool handoverByPlayer,
                                                             float totalPayment, object productList,
@@ -126,8 +126,7 @@ namespace BusinessIntelligenceMod
                 MelonLogger.Msg("ProcessHandoverServerSide_Postfix executed!");
 
                 string customerName = "Unknown";
-                // Fixed: checking NPC directly instead of __instance first
-                if (__instance.NPC != null)
+                if (__instance != null && __instance.NPC != null)
                 {
                     customerName = __instance.NPC.fullName;
                 }
