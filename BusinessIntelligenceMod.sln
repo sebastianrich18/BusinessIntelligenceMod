@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35919.96 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BusinessIntelligenceMod", "BusinessIntelligenceMod\BusinessIntelligenceMod.csproj", "{5B152C99-25B1-405A-8A57-F40A6085DD82}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5B152C99-25B1-405A-8A57-F40A6085DD82}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5B152C99-25B1-405A-8A57-F40A6085DD82}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5B152C99-25B1-405A-8A57-F40A6085DD82}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5B152C99-25B1-405A-8A57-F40A6085DD82}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {95026959-2781-4FBD-BE87-71BA27E5FF43}
+	EndGlobalSection
+EndGlobal
