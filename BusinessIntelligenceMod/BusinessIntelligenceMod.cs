@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using MelonLoader;
 using HarmonyLib;
 using UnityEngine;
@@ -23,31 +24,25 @@ namespace BusinessIntelligenceMod
         public static readonly string ModDataPath = Path.Combine(Application.persistentDataPath, "BusinessIntelligence");
         public static BusinessIntelligenceMod Instance;
 
-        // Tracking lists for different types of data
-        private List<string> salesLog = new List<string>();
-        private List<string> offerLog = new List<string>();
-        private List<string> counterOfferLog = new List<string>();
-        private List<string> customerPreferencesLog = new List<string>();
+        // Path to the single CSV file
+        private string dataLogPath;
 
-        // CSV Headers
-        private const string SALES_HEADER = "DateTime,GameTime,Customer,Dealer,HandoverByPlayer,Payment,Satisfaction,QuantityRequested,QuantityProvided,ItemIDs,ItemTypes";
-        private const string OFFERS_HEADER = "DateTime,GameTime,Customer,ProductID,ProductType,Quantity,Price,Window,SuccessChance,Accepted";
-        private const string COUNTER_OFFERS_HEADER = "DateTime,GameTime,Customer,OriginalProductID,OriginalProductType,OriginalQuantity,OriginalPrice,CounterProductID,CounterProductType,CounterQuantity,CounterPrice,Accepted";
-        private const string CUSTOMER_PREFERENCES_HEADER = "DateTime,GameTime,Customer,CurrentAddiction,HighestAddiction,MainDrugType,Source";
+        // CSV Header
+        private const string DATA_LOG_HEADER = "GameTime,RealTime,EventType,Payload";
 
-        // CSV File paths
-        private string salesPath;
-        private string offersPath;
-        private string counterOffersPath;
-        private string prefsPath;
+        // Event types
+        private const string EVENT_SALE = "SALE";
+        private const string EVENT_OFFER_ACCEPTED = "OFFER_ACCEPTED";
+        private const string EVENT_OFFER_REJECTED = "OFFER_REJECTED";
+        private const string EVENT_COUNTER_OFFER = "COUNTER_OFFER";
+        private const string EVENT_CUSTOMER_PREFERENCE = "CUSTOMER_PREFERENCE";
+        private const string EVENT_OFFER_CHANCE = "OFFER_CHANCE";
 
         // Time tracking
         private DateTime modStartTime;
-        private float lastExportTime = 0f;
-        private float exportInterval = 300f; // 5 minutes
 
-        // Store drug types for products
-        private Dictionary<string, string> productDrugTypes = new Dictionary<string, string>();
+        // Helper dictionary for caching offer success chances
+        private Dictionary<int, OfferChanceData> offerChanceCache = new Dictionary<int, OfferChanceData>();
 
         [Obsolete]
         public override void OnApplicationStart()
@@ -60,11 +55,11 @@ namespace BusinessIntelligenceMod
                 // Create data directory
                 Directory.CreateDirectory(ModDataPath);
 
-                // Initialize file paths
-                salesPath = Path.Combine(ModDataPath, "sales_log_latest.csv");
-                offersPath = Path.Combine(ModDataPath, "offers_log_latest.csv");
-                counterOffersPath = Path.Combine(ModDataPath, "counter_offers_log_latest.csv");
-                prefsPath = Path.Combine(ModDataPath, "customer_preferences_latest.csv");
+                // Initialize file path for the single CSV
+                dataLogPath = Path.Combine(ModDataPath, "business_intelligence_data.csv");
+
+                // Create CSV file with header if it doesn't exist
+                InitializeCSVFile();
 
                 // Apply Harmony patches
                 HarmonyLib.Harmony harmony = new HarmonyLib.Harmony("com.yourusername.businessintelligence");
@@ -86,14 +81,11 @@ namespace BusinessIntelligenceMod
                 // Counter-offer tracking
                 PatchMethod(harmony, customerType, "ProcessCounterOfferServerSide", nameof(ProcessCounterOfferServerSide_Postfix));
 
-                // Delivery evaluation - this was causing an error, but we'll keep it and handle errors better
+                // Delivery evaluation
                 PatchMethod(harmony, customerType, "EvaluateDelivery", nameof(EvaluateDelivery_Postfix));
 
-                // Initialize CSV files with headers
-                InitializeCSVFiles();
-
                 MelonLogger.Msg("Business Intelligence Mod initialized!");
-                MelonLogger.Msg($"Data will be saved to: {ModDataPath}");
+                MelonLogger.Msg($"Data will be saved to: {dataLogPath}");
             }
             catch (Exception ex)
             {
@@ -101,37 +93,20 @@ namespace BusinessIntelligenceMod
             }
         }
 
-        private void InitializeCSVFiles()
+        private void InitializeCSVFile()
         {
             try
             {
-                // Sales log
-                if (!File.Exists(salesPath))
+                // Create CSV file with header if it doesn't exist
+                if (!File.Exists(dataLogPath))
                 {
-                    File.WriteAllText(salesPath, SALES_HEADER + Environment.NewLine);
-                }
-
-                // Offers log
-                if (!File.Exists(offersPath))
-                {
-                    File.WriteAllText(offersPath, OFFERS_HEADER + Environment.NewLine);
-                }
-
-                // Counter-offers log
-                if (!File.Exists(counterOffersPath))
-                {
-                    File.WriteAllText(counterOffersPath, COUNTER_OFFERS_HEADER + Environment.NewLine);
-                }
-
-                // Customer preferences log
-                if (!File.Exists(prefsPath))
-                {
-                    File.WriteAllText(prefsPath, CUSTOMER_PREFERENCES_HEADER + Environment.NewLine);
+                    File.WriteAllText(dataLogPath, DATA_LOG_HEADER + Environment.NewLine);
+                    MelonLogger.Msg($"Created data log file at {dataLogPath}");
                 }
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Error initializing CSV files: {ex}");
+                MelonLogger.Error($"Error initializing CSV file: {ex.Message}");
             }
         }
 
@@ -191,219 +166,27 @@ namespace BusinessIntelligenceMod
             }
         }
 
-        public override void OnUpdate()
-        {
-            // Periodic export of data
-            lastExportTime += Time.deltaTime;
-            if (lastExportTime >= exportInterval)
-            {
-                ExportData("periodic");
-                lastExportTime = 0f;
-            }
-        }
-
-        public override void OnApplicationQuit()
-        {
-            ConsolidateCSVFiles();
-        }
-
-        private void ConsolidateCSVFiles()
+        // Helper method to log events to the CSV file
+        private void LogEvent(string eventType, string payload)
         {
             try
             {
-                string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-                string sessionLength = (DateTime.Now - modStartTime).ToString(@"hh\:mm\:ss");
+                string gameTime = DateTime.Now.ToString("HH:mm:ss");
+                string realTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-                // Consolidate sales logs
-                ConsolidateFile(salesPath, $"sales_log_{timestamp}_final.csv", SALES_HEADER);
+                // Escape any commas in the payload with quotes to maintain CSV integrity
+                string escapedPayload = $"\"{payload.Replace("\"", "\"\"")}\"";
 
-                // Consolidate offers logs
-                ConsolidateFile(offersPath, $"offers_log_{timestamp}_final.csv", OFFERS_HEADER);
+                string logEntry = $"{gameTime},{realTime},{eventType},{escapedPayload}";
 
-                // Consolidate counter-offers logs
-                ConsolidateFile(counterOffersPath, $"counter_offers_log_{timestamp}_final.csv", COUNTER_OFFERS_HEADER);
+                // Append to the CSV file
+                File.AppendAllText(dataLogPath, logEntry + Environment.NewLine);
 
-                // Consolidate customer preferences logs
-                ConsolidateFile(prefsPath, $"customer_preferences_{timestamp}_final.csv", CUSTOMER_PREFERENCES_HEADER);
-
-                // Generate session summary
-                string summaryPath = Path.Combine(ModDataPath, $"session_summary_{timestamp}_final.txt");
-                using (StreamWriter writer = new StreamWriter(summaryPath))
-                {
-                    writer.WriteLine($"Session Start: {modStartTime}");
-                    writer.WriteLine($"Session Length: {sessionLength}");
-                    writer.WriteLine($"Total Sales: {salesLog.Count}");
-                    writer.WriteLine($"Total Offers: {offerLog.Count}");
-                    writer.WriteLine($"Total Counter-Offers: {counterOfferLog.Count}");
-                    writer.WriteLine($"Total Customer Preference Entries: {customerPreferencesLog.Count}");
-
-                    // Calculate total revenue
-                    float totalRevenue = 0f;
-                    foreach (string sale in salesLog)
-                    {
-                        string[] parts = sale.Split(',');
-                        if (parts.Length > 6)
-                        {
-                            float price;
-                            if (float.TryParse(parts[6], out price))
-                            {
-                                totalRevenue += price;
-                            }
-                        }
-                    }
-                    writer.WriteLine($"Total Revenue: ${totalRevenue:F2}");
-                }
-
-                MelonLogger.Msg($"Exported session summary to {summaryPath}");
-
-                // Clean up temporary files
-                CleanupTemporaryFiles();
+                MelonLogger.Msg($"Logged {eventType} event");
             }
             catch (Exception ex)
             {
-                MelonLogger.Error($"Error consolidating CSV files: {ex.Message}");
-            }
-        }
-
-        private void ConsolidateFile(string tempPath, string finalPath, string header)
-        {
-            try
-            {
-                string finalFilePath = Path.Combine(ModDataPath, finalPath);
-
-                // Create the consolidated file with header
-                using (StreamWriter writer = new StreamWriter(finalFilePath))
-                {
-                    writer.WriteLine(header);
-
-                    // Read the temporary file skipping the header
-                    if (File.Exists(tempPath))
-                    {
-                        string[] lines = File.ReadAllLines(tempPath);
-                        bool isFirstLine = true;
-
-                        foreach (string line in lines)
-                        {
-                            if (isFirstLine)
-                            {
-                                isFirstLine = false; // Skip header
-                                continue;
-                            }
-
-                            if (!string.IsNullOrWhiteSpace(line))
-                            {
-                                writer.WriteLine(line);
-                            }
-                        }
-                    }
-                }
-
-                MelonLogger.Msg($"Consolidated data to {finalFilePath}");
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"Error consolidating file {tempPath}: {ex.Message}");
-            }
-        }
-
-        private void CleanupTemporaryFiles()
-        {
-            try
-            {
-                // Delete the temporary files
-                if (File.Exists(salesPath)) File.Delete(salesPath);
-                if (File.Exists(offersPath)) File.Delete(offersPath);
-                if (File.Exists(counterOffersPath)) File.Delete(counterOffersPath);
-                if (File.Exists(prefsPath)) File.Delete(prefsPath);
-
-                // Delete any other periodic exports
-                string[] periodics = Directory.GetFiles(ModDataPath, "*_periodic.csv");
-                foreach (string file in periodics)
-                {
-                    File.Delete(file);
-                }
-
-                MelonLogger.Msg("Cleaned up temporary files");
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"Error cleaning up temporary files: {ex.Message}");
-            }
-        }
-
-        private void ExportData(string exportType)
-        {
-            try
-            {
-                string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-
-                // Only create periodic exports if requested
-                if (exportType == "periodic")
-                {
-                    // Export sales
-                    if (salesLog.Count > 0)
-                    {
-                        string salesExportPath = Path.Combine(ModDataPath, $"sales_log_{timestamp}_{exportType}.csv");
-                        using (StreamWriter writer = new StreamWriter(salesExportPath))
-                        {
-                            writer.WriteLine(SALES_HEADER);
-                            foreach (string line in salesLog)
-                            {
-                                writer.WriteLine(line);
-                            }
-                        }
-                        MelonLogger.Msg($"Exported {salesLog.Count} sale records");
-                    }
-
-                    // Export offers
-                    if (offerLog.Count > 0)
-                    {
-                        string offersExportPath = Path.Combine(ModDataPath, $"offers_log_{timestamp}_{exportType}.csv");
-                        using (StreamWriter writer = new StreamWriter(offersExportPath))
-                        {
-                            writer.WriteLine(OFFERS_HEADER);
-                            foreach (string line in offerLog)
-                            {
-                                writer.WriteLine(line);
-                            }
-                        }
-                        MelonLogger.Msg($"Exported {offerLog.Count} offer records");
-                    }
-
-                    // Export counter-offers
-                    if (counterOfferLog.Count > 0)
-                    {
-                        string counterOffersExportPath = Path.Combine(ModDataPath, $"counter_offers_log_{timestamp}_{exportType}.csv");
-                        using (StreamWriter writer = new StreamWriter(counterOffersExportPath))
-                        {
-                            writer.WriteLine(COUNTER_OFFERS_HEADER);
-                            foreach (string line in counterOfferLog)
-                            {
-                                writer.WriteLine(line);
-                            }
-                        }
-                        MelonLogger.Msg($"Exported {counterOfferLog.Count} counter-offer records");
-                    }
-
-                    // Export customer preferences
-                    if (customerPreferencesLog.Count > 0)
-                    {
-                        string preferencesExportPath = Path.Combine(ModDataPath, $"customer_preferences_{timestamp}_{exportType}.csv");
-                        using (StreamWriter writer = new StreamWriter(preferencesExportPath))
-                        {
-                            writer.WriteLine(CUSTOMER_PREFERENCES_HEADER);
-                            foreach (string line in customerPreferencesLog)
-                            {
-                                writer.WriteLine(line);
-                            }
-                        }
-                        MelonLogger.Msg($"Exported {customerPreferencesLog.Count} customer preference records");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"Error exporting data: {ex.Message}");
+                MelonLogger.Error($"Error logging event: {ex.Message}");
             }
         }
 
@@ -448,6 +231,25 @@ namespace BusinessIntelligenceMod
             return "unknown";
         }
 
+        // Helper method to create a stringified payload for CSV
+        private static string CreatePayload(params KeyValuePair<string, string>[] pairs)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("{");
+
+            for (int i = 0; i < pairs.Length; i++)
+            {
+                var pair = pairs[i];
+                sb.Append($"\"{pair.Key}\":\"{pair.Value.Replace("\"", "\\\"")}\"");
+
+                if (i < pairs.Length - 1)
+                    sb.Append(",");
+            }
+
+            sb.Append("}");
+            return sb.ToString();
+        }
+
         // Harmony patch methods for tracking various aspects
 
         // Sale tracking
@@ -478,9 +280,6 @@ namespace BusinessIntelligenceMod
                     dealerName = dealer.name;
                 }
 
-                // Get game time - instead of using Day property
-                string gameTime = DateTime.Now.ToString("HH:mm:ss");
-
                 // Process items
                 int totalQuantityRequested = 0;
                 int totalQuantityProvided = 0;
@@ -506,27 +305,21 @@ namespace BusinessIntelligenceMod
                     }
                 }
 
-                // Build CSV record with updated format
-                string logEntry = string.Join(",", new string[]
-                {
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    gameTime,
-                    customerName,
-                    dealerName,
-                    handoverByPlayer.ToString(),
-                    totalPayment.ToString("F2"),
-                    satisfaction.ToString("F4"),
-                    totalQuantityRequested.ToString(),
-                    totalQuantityProvided.ToString(),
-                    itemIDs,
-                    itemTypes
-                });
+                // Create payload for sale event
+                string payload = CreatePayload(
+                    new KeyValuePair<string, string>("customer", customerName),
+                    new KeyValuePair<string, string>("dealer", dealerName),
+                    new KeyValuePair<string, string>("handoverByPlayer", handoverByPlayer.ToString()),
+                    new KeyValuePair<string, string>("payment", totalPayment.ToString("F2")),
+                    new KeyValuePair<string, string>("satisfaction", satisfaction.ToString("F4")),
+                    new KeyValuePair<string, string>("quantityRequested", totalQuantityRequested.ToString()),
+                    new KeyValuePair<string, string>("quantityProvided", totalQuantityProvided.ToString()),
+                    new KeyValuePair<string, string>("itemIDs", itemIDs),
+                    new KeyValuePair<string, string>("itemTypes", itemTypes)
+                );
 
-                Instance.salesLog.Add(logEntry);
-                MelonLogger.Msg($"Tracked sale: {logEntry}");
-
-                // Immediately save for testing
-                File.AppendAllText(Instance.salesPath, logEntry + Environment.NewLine);
+                // Log the sale event
+                Instance.LogEvent(EVENT_SALE, payload);
 
                 // Also track customer preferences after a sale
                 if (__instance.CurrentAddiction > 0)
@@ -538,19 +331,17 @@ namespace BusinessIntelligenceMod
                         mainDrugType = ClassifyProductType(productList.entries[0].ProductID);
                     }
 
-                    string prefsEntry = string.Join(",", new string[]
-                    {
-                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                        gameTime,
-                        customerName,
-                        __instance.CurrentAddiction.ToString("F4"),
-                        "0", // HighestAddiction - placeholder
-                        mainDrugType,
-                        "Sale" // Source of preference data
-                    });
+                    // Create payload for customer preference
+                    string prefsPayload = CreatePayload(
+                        new KeyValuePair<string, string>("customer", customerName),
+                        new KeyValuePair<string, string>("currentAddiction", __instance.CurrentAddiction.ToString("F4")),
+                        new KeyValuePair<string, string>("highestAddiction", "0"), // Placeholder
+                        new KeyValuePair<string, string>("mainDrugType", mainDrugType),
+                        new KeyValuePair<string, string>("source", "Sale")
+                    );
 
-                    Instance.customerPreferencesLog.Add(prefsEntry);
-                    File.AppendAllText(Instance.prefsPath, prefsEntry + Environment.NewLine);
+                    // Log the customer preference event
+                    Instance.LogEvent(EVENT_CUSTOMER_PREFERENCE, prefsPayload);
                 }
             }
             catch (Exception ex)
@@ -576,12 +367,15 @@ namespace BusinessIntelligenceMod
 
                 string itemsDetails = "";
                 float totalQuantity = 0;
+                string itemTypes = "";
 
                 if (items != null)
                 {
                     foreach (var item in items)
                     {
-                        itemsDetails += $"{item.ID}({item.Quantity}),";
+                        string productType = ClassifyProductType(item.ID);
+                        itemsDetails += $"{item.ID}({item.Quantity});";
+                        itemTypes += $"{productType};";
                         totalQuantity += item.Quantity;
                     }
                 }
@@ -610,6 +404,19 @@ namespace BusinessIntelligenceMod
                         Instance.offerChanceCache[customerID].AskingPrice = askingPrice;
                         Instance.offerChanceCache[customerID].SuccessChance = __result;
                     }
+
+                    // Create payload for offer chance calculation
+                    string payload = CreatePayload(
+                        new KeyValuePair<string, string>("customer", customerName),
+                        new KeyValuePair<string, string>("items", itemsDetails),
+                        new KeyValuePair<string, string>("itemTypes", itemTypes),
+                        new KeyValuePair<string, string>("askingPrice", askingPrice.ToString("F2")),
+                        new KeyValuePair<string, string>("totalQuantity", totalQuantity.ToString()),
+                        new KeyValuePair<string, string>("successChance", __result.ToString("F4"))
+                    );
+
+                    // Log the offer chance event
+                    Instance.LogEvent(EVENT_OFFER_CHANCE, payload);
 
                     // Log the cached value to verify it's working
                     MelonLogger.Msg($"Cached success chance: {__result:F4} for customer {customerName} (ID: {customerID})");
@@ -652,29 +459,19 @@ namespace BusinessIntelligenceMod
                     MelonLogger.Warning($"No cached success chance found for customer {customerName} (ID: {customerID})");
                 }
 
-                // Get game time
-                string gameTime = DateTime.Now.ToString("HH:mm:ss");
+                // Create payload for accepted offer
+                string payload = CreatePayload(
+                    new KeyValuePair<string, string>("customer", customerName),
+                    new KeyValuePair<string, string>("productID", entry.ProductID),
+                    new KeyValuePair<string, string>("productType", productType),
+                    new KeyValuePair<string, string>("quantity", entry.Quantity.ToString()),
+                    new KeyValuePair<string, string>("price", __instance.OfferedContractInfo.Payment.ToString("F2")),
+                    new KeyValuePair<string, string>("window", window.ToString()),
+                    new KeyValuePair<string, string>("successChance", successChance.ToString("F4"))
+                );
 
-                // Build CSV record
-                string logEntry = string.Join(",", new string[]
-                {
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    gameTime,
-                    customerName,
-                    entry.ProductID,
-                    productType,
-                    entry.Quantity.ToString(),
-                    __instance.OfferedContractInfo.Payment.ToString("F2"),
-                    window.ToString(),
-                    successChance.ToString("F4"),
-                    "True" // Accepted
-                });
-
-                Instance.offerLog.Add(logEntry);
-                MelonLogger.Msg($"Tracked accepted offer: {logEntry}");
-
-                // Immediately save for testing
-                File.AppendAllText(Instance.offersPath, logEntry + Environment.NewLine);
+                // Log the accepted offer event
+                Instance.LogEvent(EVENT_OFFER_ACCEPTED, payload);
             }
             catch (Exception ex)
             {
@@ -713,29 +510,18 @@ namespace BusinessIntelligenceMod
                     MelonLogger.Warning($"No cached success chance found for customer {customerName} (ID: {customerID})");
                 }
 
-                // Get game time
-                string gameTime = DateTime.Now.ToString("HH:mm:ss");
+                // Create payload for rejected offer
+                string payload = CreatePayload(
+                    new KeyValuePair<string, string>("customer", customerName),
+                    new KeyValuePair<string, string>("productID", entry.ProductID),
+                    new KeyValuePair<string, string>("productType", productType),
+                    new KeyValuePair<string, string>("quantity", entry.Quantity.ToString()),
+                    new KeyValuePair<string, string>("price", __instance.OfferedContractInfo.Payment.ToString("F2")),
+                    new KeyValuePair<string, string>("successChance", successChance.ToString("F4"))
+                );
 
-                // Build CSV record
-                string logEntry = string.Join(",", new string[]
-                {
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    gameTime,
-                    customerName,
-                    entry.ProductID,
-                    productType,
-                    entry.Quantity.ToString(),
-                    __instance.OfferedContractInfo.Payment.ToString("F2"),
-                    "N/A", // No window for rejected offer
-                    successChance.ToString("F4"),
-                    "False" // Rejected
-                });
-
-                Instance.offerLog.Add(logEntry);
-                MelonLogger.Msg($"Tracked rejected offer: {logEntry}");
-
-                // Immediately save for testing
-                File.AppendAllText(Instance.offersPath, logEntry + Environment.NewLine);
+                // Log the rejected offer event
+                Instance.LogEvent(EVENT_OFFER_REJECTED, payload);
             }
             catch (Exception ex)
             {
@@ -761,35 +547,26 @@ namespace BusinessIntelligenceMod
                 string originalProductType = ClassifyProductType(originalEntry.ProductID);
                 string counterProductType = ClassifyProductType(productID);
 
-                // Get game time
-                string gameTime = DateTime.Now.ToString("HH:mm:ss");
-
                 // We can't call EvaluateCounteroffer directly as it's protected
                 // Try to infer acceptance based on later behavior
                 bool accepted = true; // Assume accepted for now
 
-                // Build CSV record
-                string logEntry = string.Join(",", new string[]
-                {
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    gameTime,
-                    customerName,
-                    originalEntry.ProductID,
-                    originalProductType,
-                    originalEntry.Quantity.ToString(),
-                    __instance.OfferedContractInfo.Payment.ToString("F2"),
-                    productID,
-                    counterProductType,
-                    quantity.ToString(),
-                    price.ToString("F2"),
-                    accepted.ToString()
-                });
+                // Create payload for counter offer
+                string payload = CreatePayload(
+                    new KeyValuePair<string, string>("customer", customerName),
+                    new KeyValuePair<string, string>("originalProductID", originalEntry.ProductID),
+                    new KeyValuePair<string, string>("originalProductType", originalProductType),
+                    new KeyValuePair<string, string>("originalQuantity", originalEntry.Quantity.ToString()),
+                    new KeyValuePair<string, string>("originalPrice", __instance.OfferedContractInfo.Payment.ToString("F2")),
+                    new KeyValuePair<string, string>("counterProductID", productID),
+                    new KeyValuePair<string, string>("counterProductType", counterProductType),
+                    new KeyValuePair<string, string>("counterQuantity", quantity.ToString()),
+                    new KeyValuePair<string, string>("counterPrice", price.ToString("F2")),
+                    new KeyValuePair<string, string>("accepted", accepted.ToString())
+                );
 
-                Instance.counterOfferLog.Add(logEntry);
-                MelonLogger.Msg($"Tracked counter offer: {logEntry}");
-
-                // Immediately save for testing
-                File.AppendAllText(Instance.counterOffersPath, logEntry + Environment.NewLine);
+                // Log the counter offer event
+                Instance.LogEvent(EVENT_COUNTER_OFFER, payload);
             }
             catch (Exception ex)
             {
@@ -810,28 +587,22 @@ namespace BusinessIntelligenceMod
                     customerName = __instance.NPC.fullName;
                 }
 
-                // Get game time
-                string gameTime = DateTime.Now.ToString("HH:mm:ss");
-
                 // Store the drug type information for future lookup
                 string mainDrugTypeStr = mainDrugType.ToString();
 
-                // Log customer addiction level and preferred drug type
-                string prefsEntry = string.Join(",", new string[]
-                {
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    gameTime,
-                    customerName,
-                    __instance.CurrentAddiction.ToString("F4"),
-                    highestAddiction.ToString("F4"),
-                    mainDrugTypeStr,
-                    "Delivery" // Source of preference data
-                });
+                // Create payload for customer preference from delivery
+                string payload = CreatePayload(
+                    new KeyValuePair<string, string>("customer", customerName),
+                    new KeyValuePair<string, string>("currentAddiction", __instance.CurrentAddiction.ToString("F4")),
+                    new KeyValuePair<string, string>("highestAddiction", highestAddiction.ToString("F4")),
+                    new KeyValuePair<string, string>("mainDrugType", mainDrugTypeStr),
+                    new KeyValuePair<string, string>("matchedProductCount", matchedProductCount.ToString()),
+                    new KeyValuePair<string, string>("satisfaction", __result.ToString("F4")),
+                    new KeyValuePair<string, string>("source", "Delivery")
+                );
 
-                Instance.customerPreferencesLog.Add(prefsEntry);
-
-                // Immediately save for testing
-                File.AppendAllText(Instance.prefsPath, prefsEntry + Environment.NewLine);
+                // Log the customer preference event
+                Instance.LogEvent(EVENT_CUSTOMER_PREFERENCE, payload);
 
                 // Log the detailed evaluation info
                 MelonLogger.Msg($"Delivery evaluation for {customerName}: " +
@@ -845,8 +616,6 @@ namespace BusinessIntelligenceMod
         }
 
         // Helper class for caching offer chances
-        private Dictionary<int, OfferChanceData> offerChanceCache = new Dictionary<int, OfferChanceData>();
-
         private class OfferChanceData
         {
             public DateTime Timestamp;
